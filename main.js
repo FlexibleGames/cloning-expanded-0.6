@@ -23,7 +23,7 @@ const DNA_TYPES = [
   { id: "dnaVoltblub", name: "Voltblub DNA", color: 0xfde047, sprite: "eyes", creatureType: "eyes", aliases: ["eyes", "voltblub"] },
   { id: "dnaVoidgrazer", name: "Voidgrazer DNA", color: 0xe879f9, sprite: "voidgrazer", creatureType: "voidgrazer", aliases: ["voidgrazer"] },
   { id: "dnaChillow", name: "Chillow DNA", color: 0xdbeafe, sprite: "chillow", creatureType: "chillow", aliases: ["chillow", "chillo"] },
-  { id: "dnaOxyblob", name: "Oxyblob DNA", color: 0x86efac, sprite: "oxyblob", creatureType: "oxyblob", aliases: ["oxyblob", "oxyBlob", "oxydrop", "oxyDrop"] },
+  { id: "dnaOxyblob", name: "Oxyblob DNA", color: 0x86efac, sprite: "oxyblob", creatureType: "oxyblob", aliases: ["oxyblob", "oxyBlob", "oxydrop", "oxyDrop", "oxygenblob", "oxygenBlob", "o2blob", "gasblob"] },
 ];
 
 const CELL = (sandkit.enums && sandkit.enums.CellType) || {};
@@ -48,25 +48,69 @@ function normalizeName(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function resolveCreatureIds() {
-  let defs = [];
+function definitionNames(def) {
+  if (!def || typeof def !== "object") return [];
+  return [
+    def.id,
+    def.typeId,
+    def.type,
+    def.name,
+    def.displayName,
+    def.spriteId,
+    def.sprite,
+    def.nameKey,
+    def.description,
+    def.shortDescription,
+  ].map(normalizeName).filter(Boolean);
+}
+
+function wantedNames(dna) {
+  const display = normalizeName(String(dna.name || "").replace(/dna$/i, ""));
+  return [dna.creatureType, dna.sprite, display, ...(dna.aliases || [])]
+    .map(normalizeName)
+    .filter(Boolean);
+}
+
+function isOxyblobText(names) {
+  return names.some((name) =>
+    name.includes("oxyblob") ||
+    name.includes("oxygenblob") ||
+    name.includes("oxydrop") ||
+    (name.includes("oxy") && name.includes("blob"))
+  );
+}
+
+function definitionMatchesDna(def, dna) {
+  const names = definitionNames(def);
+  const wanted = wantedNames(dna);
+  if (names.some((name) => wanted.includes(name))) return true;
+  if (dna.id === "dnaOxyblob" && isOxyblobText(names)) return true;
+  return wanted.some((name) => name.length >= 6 && names.some((candidate) => candidate.includes(name)));
+}
+
+function allCreatureDefinitions() {
   try {
     const all = api.entities.getAllTypeDefinitions();
-    if (Array.isArray(all)) defs = all;
-    else if (all && typeof all === "object") defs = Object.values(all);
-  } catch (error) {
-    return;
-  }
+    if (Array.isArray(all)) return all;
+    if (all && typeof all === "object") return Object.values(all);
+  } catch (error) {}
+  return [];
+}
+
+function bindDnaToDefinition(dna, def) {
+  const id = typeIdOf(def);
+  if (id) dna.creatureType = id;
+  dna.sprite = (def && (def.spriteId || def.sprite)) || id || dna.sprite;
+}
+
+function resolveCreatureIds() {
+  const defs = allCreatureDefinitions();
+  if (!defs.length) return;
 
   for (const dna of DNA_TYPES) {
-    const display = normalizeName(dna.name.replace(/ dna$/i, ""));
-    const wanted = new Set([dna.creatureType, dna.sprite, ...(dna.aliases || []), display].map(normalizeName));
     for (const def of defs) {
-      const id = typeIdOf(def);
-      const names = [id, def && def.name, def && def.displayName, def && def.spriteId, def && def.sprite].map(normalizeName);
-      if (!names.some((name) => name && wanted.has(name))) continue;
-      dna.creatureType = id || dna.creatureType;
-      dna.sprite = (def && (def.spriteId || def.sprite)) || id || dna.sprite;
+      if (!definitionMatchesDna(def, dna)) continue;
+      bindDnaToDefinition(dna, def);
       break;
     }
   }
@@ -74,11 +118,34 @@ function resolveCreatureIds() {
 
 function dnaForCreature(creature) {
   const type = normalizeName(creature && (creature.type || creature.typeId));
-  if (!type) return null;
-  return DNA_TYPES.find((dna) => {
-    const ids = [dna.creatureType, dna.sprite, ...(dna.aliases || [])].map(normalizeName);
-    return ids.includes(type);
-  }) || null;
+  const direct = DNA_TYPES.find((dna) => type && wantedNames(dna).includes(type));
+  if (direct) return direct;
+
+  let def = null;
+  try {
+    def = api.entities.getTypeDefinitionById(creature && (creature.type || creature.typeId));
+  } catch (error) {}
+
+  if (!def && type) {
+    def = allCreatureDefinitions().find((item) => definitionNames(item).includes(type)) || null;
+  }
+
+  if (!def) return null;
+
+  const dna = DNA_TYPES.find((item) => definitionMatchesDna(def, item));
+  if (dna) bindDnaToDefinition(dna, def);
+  return dna || null;
+}
+
+function distanceToCreature(creature, x, y) {
+  const originX = Number(creature && creature.x) || 0;
+  const originY = Number(creature && creature.y) || 0;
+  let best = Math.hypot(originX - x, originY - y);
+  // Oxyblobs cling to the ceiling, so the body hangs below the entity origin.
+  for (let drop = 16; drop <= 64; drop += 16) {
+    best = Math.min(best, Math.hypot(originX - x, originY + drop - y));
+  }
+  return best;
 }
 
 function spawnCreature(ctx, typeId, x, y) {
@@ -307,41 +374,42 @@ function registerDNANeedle() {
       
       handleAction: (e, t) => {
         if (!e.session.action.state[enums.ActionState.Active]) return;
-        
+
+        resolveCreatureIds();
         const mousePos = e.session.input.mouse.worldPosition;
         const creatures = FH.entities.getAll(e);
-        
+        let best = null;
+        let bestDist = 72;
+
         for (const creature of creatures) {
-          const dist = Math.hypot(
-            creature.x - mousePos.x,
-            creature.y - mousePos.y
-          );
-          
-          if (dist < 20) {
-            const dnaInfo = extractDNAFromCreature(e, creature);
-            
-            if (dnaInfo) {
-              //console.log(`[Needle] Extracted ${dnaInfo.name}!`);
-              
-              api.effects.createParticlesAtWorld(
-                creature.x,
-                creature.y,
-                {
-                  count: 8,
-                  color: dnaInfo.color,
-                  minSpeed: 5,
-                  maxSpeed: 20,
-                  minSize: 0.3,
-                  maxSize: 0.8,
-                  minLifetime: 0.3,
-                  maxLifetime: 0.7,
-                }
-              );
-              
-              return;
-            }
-          }
+          const dist = distanceToCreature(creature, mousePos.x, mousePos.y);
+          if (dist >= bestDist) continue;
+          const dnaInfo = dnaForCreature(creature);
+          if (!dnaInfo || creature.dnaExtracted) continue;
+          best = { creature, dnaInfo };
+          bestDist = dist;
         }
+
+        if (!best) return;
+
+        const creature = best.creature;
+        const dnaInfo = extractDNAFromCreature(e, creature);
+        if (!dnaInfo) return;
+
+        api.effects.createParticlesAtWorld(
+          creature.x,
+          creature.y,
+          {
+            count: 8,
+            color: dnaInfo.color,
+            minSpeed: 5,
+            maxSpeed: 20,
+            minSize: 0.3,
+            maxSize: 0.8,
+            minLifetime: 0.3,
+            maxLifetime: 0.7,
+          }
+        );
       },
     });
     
@@ -494,13 +562,13 @@ api.structures.register({
     [1, 1, 0, 0, 1, 1, 0, 1],
     [1, 1, 0, 0, 1, 1, 1, 1],
     [1, 1, 0, 0, 1, 1, 1, 1],
-    [45, 0, 0, 0, 0, 0, 0, 45],
-    [45, 0, 0, 0, 0, 0, 0, 45],
-    [45, 0, 0, 0, 0, 0, 0, 45],
-    [45, 0, 0, 0, 0, 0, 0, 45],
-    [45, 0, 0, 0, 0, 0, 0, 45],
-    [45, 0, 0, 0, 0, 0, 0, 45],
-    [45, 0, 0, 0, 0, 0, 0, 45],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1],
     [1, 1, 1, 1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1, 1, 1, 1],
   ],
@@ -568,6 +636,27 @@ api.structures.register({
 });
 
 // ==================== CHAMBER LOGIC ====================
+
+function retileExistingChambers() {
+  try {
+    api.structures.forEachOfType(CHAMBER_ID, (structure) => {
+      for (let dy = 0; dy < BLOCK_HEIGHT; dy++) {
+        for (let dx = 0; dx < BLOCK_WIDTH; dx++) {
+          const x = structure.x + dx;
+          const y = structure.y + dy;
+          let terrain = null;
+          try {
+            terrain = api.terrains.getTypeAtCell(x, y);
+          } catch (error) {}
+          if (terrain !== 45) continue;
+          try {
+            api.terrains.replaceAtCellWhenIdle(x, y, 1);
+          } catch (error) {}
+        }
+      }
+    });
+  } catch (error) {}
+}
 
 function useDNAPellet(ctx, structure) {
   const cellX = structure.x + 6;
@@ -812,5 +901,8 @@ async function initialize() {
 initialize().catch(e => console.error("[Cloning Expanded] Init failed:", e));
 
 try {
-  api.events.on("game:ready", () => resolveCreatureIds());
+  api.events.on("game:ready", () => {
+    resolveCreatureIds();
+    retileExistingChambers();
+  });
 } catch (error) {}
