@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "fg.cloning_expanded",
   "name": "Cloning Expanded",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "apiVersion": 1,
   "entry": "main.js",
   "description": "Unethical means of increasing critter population. Includes the 0.6 critters Chillow and Oxyblob.",
