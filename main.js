@@ -2,7 +2,7 @@
 
 const { api, enums, react } = sandkit;
 
-const MOD_ID = "sirmonkz.cloning_expanded";
+const MOD_ID = "fg.cloning_expanded";
 const FH = sandkit.engine.api;
 
 const CHAMBER_ID = "cloningChamber";
@@ -421,6 +421,36 @@ function registerDNANeedle() {
   }
 }
 
+function dnaDropCount() {
+  let value = 4;
+  try {
+    value = Number(api.settings.get("dnaCount"));
+  } catch (error) {}
+  if (!Number.isFinite(value)) value = 4;
+  return Math.max(2, Math.min(20, Math.round(value)));
+}
+
+function placeDnaCell(x, y, elementType) {
+  const existingElement = api.elements.getTypeAtCell(x, y);
+  const terrainType = api.terrains.getTypeAtCell(x, y);
+
+  if (terrainType === CELL_BLOCK) return false;
+
+  if (terrainType === CELL_SANDIUM_SOIL) {
+    api.elements.replaceAtCellWhenIdle(x, y, elementType);
+  }
+  if (existingElement === ELEMENT_WATER) {
+    api.elements.replaceAtCellWhenIdle(x, y, elementType);
+  } else if (terrainType !== null && terrainType !== 0) {
+    api.terrains.replaceAtCellWhenIdle(x, y, elementType);
+  } else if (existingElement !== null) {
+    api.elements.replaceAtCellWhenIdle(x, y, elementType);
+  } else {
+    api.elements.createAtCellWhenIdle(x, y, elementType);
+  }
+  return true;
+}
+
 function extractDNAFromCreature(ctx, creature) {
   const dnaInfo = dnaForCreature(creature);
   
@@ -446,35 +476,15 @@ function extractDNAFromCreature(ctx, creature) {
     setTimeout(() => {
       try {
         setTimeout(() => {
-          const spawnOffsets = [
-            { x: 0, y: 0 },
-            { x: 1, y: 0 },
-            { x: 0, y: 1 },
-            { x: 1, y: 1 },
-          ];
-          
-          spawnOffsets.forEach(offset => {
-            const spawnX = creatureX + offset.x;
-            const spawnY = creatureY + offset.y;
-            
-            const existingElement = api.elements.getTypeAtCell(spawnX, spawnY);
-            const terrainType = api.terrains.getTypeAtCell(spawnX, spawnY);
-
-            if (terrainType === CELL_BLOCK) return;
-            
-            if (terrainType === CELL_SANDIUM_SOIL) {
-              api.elements.replaceAtCellWhenIdle(spawnX, spawnY, dnaInfo.elementType);
+          const count = dnaDropCount();
+          let placed = 0;
+          for (let dy = 0; placed < count && dy < 8; dy++) {
+            for (let dx = 0; placed < count && dx < 8; dx++) {
+              if (placeDnaCell(creatureX + dx, creatureY + dy, dnaInfo.elementType)) {
+                placed += 1;
+              }
             }
-            if (existingElement === ELEMENT_WATER) {
-              api.elements.replaceAtCellWhenIdle(spawnX, spawnY, dnaInfo.elementType);
-            } else if (terrainType !== null && terrainType !== 0) {
-              api.terrains.replaceAtCellWhenIdle(spawnX, spawnY, dnaInfo.elementType);
-            } else if (existingElement !== null) {
-              api.elements.replaceAtCellWhenIdle(spawnX, spawnY, dnaInfo.elementType);
-            } else {
-              api.elements.createAtCellWhenIdle(spawnX, spawnY, dnaInfo.elementType);
-            }
-          });
+          }
         }, 50);
         
       } catch (e) {
@@ -878,7 +888,14 @@ if (corrallerTechId) {
 
 async function initialize() {
   console.log("[Cloning Expanded] Starting...");
-  
+
+  try {
+    api.i18n.register("en", {
+      "mods|cloningExpanded|dnaCount": "DNA per swab",
+      "mods|cloningExpanded|dnaCountDescription": "How many DNA pixels the swab drops from one creature.",
+    });
+  } catch (error) {}
+
   resolveCreatureIds();
   registerNutrientFluidShader();
   
