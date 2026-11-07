@@ -390,7 +390,7 @@ function registerDNAPellet(dna) {
       id: dna.id,
       name: dna.name,
       description: `DNA sample for cloning a ${dna.name}.`,
-      matterType: enums.MatterType.Solid,
+      matterType: enums.MatterType.Powder,
       density: 100,
       metaColor: dna.color,
       colors: { variants: [
