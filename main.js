@@ -48,20 +48,38 @@ function normalizeName(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function translatedText(value) {
+  if (typeof value !== "string" || !value.includes("|")) return "";
+  try {
+    const translated = api.i18n.t(value);
+    return translated && translated !== value ? translated : "";
+  } catch (error) {
+    return "";
+  }
+}
+
 function definitionNames(def) {
-  if (!def || typeof def !== "object") return [];
-  return [
-    def.id,
-    def.typeId,
-    def.type,
-    def.name,
-    def.displayName,
-    def.spriteId,
-    def.sprite,
-    def.nameKey,
-    def.description,
-    def.shortDescription,
-  ].map(normalizeName).filter(Boolean);
+  const raw = [];
+  const visit = (value, depth) => {
+    if (value == null || depth > 3) return;
+    if (typeof value === "string" || typeof value === "number") {
+      raw.push(String(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value === "object") {
+      Object.keys(value).forEach((key) => {
+        if (key === "spawn" || key === "onInit" || key === "onUpdate" || key === "onCollect" || key === "onCaptureUpdate") return;
+        raw.push(key);
+        visit(value[key], depth + 1);
+      });
+    }
+  };
+  visit(def, 0);
+  return [...raw, ...raw.map(translatedText).filter(Boolean)].map(normalizeName).filter(Boolean);
 }
 
 function wantedNames(dna) {
@@ -76,7 +94,8 @@ function isOxyblobText(names) {
     name.includes("oxyblob") ||
     name.includes("oxygenblob") ||
     name.includes("oxydrop") ||
-    (name.includes("oxy") && name.includes("blob"))
+    (name.includes("oxy") && name.includes("blob")) ||
+    (name.includes("oxygen") && (name.includes("carbondioxide") || name.includes("co2")))
   );
 }
 
@@ -116,20 +135,30 @@ function resolveCreatureIds() {
   }
 }
 
+function definitionForCreature(creature) {
+  const raw = creature && (creature.type != null ? creature.type : creature.typeId);
+  const attempts = [raw, raw != null ? String(raw) : ""];
+  for (const attempt of attempts) {
+    if (attempt == null || attempt === "") continue;
+    try {
+      const def = api.entities.getTypeDefinitionById(attempt);
+      if (def) return def;
+    } catch (error) {}
+  }
+
+  const type = normalizeName(raw);
+  if (!type) return null;
+  return allCreatureDefinitions().find((item) => {
+    return normalizeName(typeIdOf(item)) === type || definitionNames(item).includes(type);
+  }) || null;
+}
+
 function dnaForCreature(creature) {
-  const type = normalizeName(creature && (creature.type || creature.typeId));
+  const type = normalizeName(creature && (creature.type != null ? creature.type : creature.typeId));
   const direct = DNA_TYPES.find((dna) => type && wantedNames(dna).includes(type));
   if (direct) return direct;
 
-  let def = null;
-  try {
-    def = api.entities.getTypeDefinitionById(creature && (creature.type || creature.typeId));
-  } catch (error) {}
-
-  if (!def && type) {
-    def = allCreatureDefinitions().find((item) => definitionNames(item).includes(type)) || null;
-  }
-
+  const def = definitionForCreature(creature);
   if (!def) return null;
 
   const dna = DNA_TYPES.find((item) => definitionMatchesDna(def, item));
@@ -137,15 +166,76 @@ function dnaForCreature(creature) {
   return dna || null;
 }
 
-function distanceToCreature(creature, x, y) {
-  const originX = Number(creature && creature.x) || 0;
-  const originY = Number(creature && creature.y) || 0;
-  let best = Math.hypot(originX - x, originY - y);
-  // Oxyblobs cling to the ceiling, so the body hangs below the entity origin.
-  for (let drop = 16; drop <= 64; drop += 16) {
-    best = Math.min(best, Math.hypot(originX - x, originY + drop - y));
+const SWAB_REACH = 180;
+const unknownCreatureLog = new Set();
+
+function creatureAimPoints(creature) {
+  const points = [];
+  const add = (x, y) => {
+    const px = Number(x);
+    const py = Number(y);
+    if (Number.isFinite(px) && Number.isFinite(py)) points.push({ x: px, y: py });
+  };
+  add(creature && creature.x, creature && creature.y);
+  add(creature && creature.worldX, creature && creature.worldY);
+  add(creature && creature.position && creature.position.x, creature && creature.position && creature.position.y);
+  add(creature && creature.body && creature.body.x, creature && creature.body && creature.body.y);
+  add(creature && creature.anchor && creature.anchor.x, creature && creature.anchor && creature.anchor.y);
+  const origin = points[0];
+  if (origin) {
+    for (const dy of [-96, -64, -32, 32, 64, 96, 128]) add(origin.x, origin.y + dy);
+    for (const dx of [-48, 48]) add(origin.x + dx, origin.y + 64);
   }
+  return points;
+}
+
+function distanceToCreature(creature, x, y) {
+  const points = creatureAimPoints(creature);
+  if (!points.length) return Infinity;
+  let best = Infinity;
+  for (const point of points) best = Math.min(best, Math.hypot(point.x - x, point.y - y));
   return best;
+}
+
+function addCreatures(found, seen, list) {
+  if (!list) return;
+  const values = Array.isArray(list) ? list : Object.values(list);
+  for (const creature of values) {
+    if (!creature || creature.id == null || typeof creature === "function") continue;
+    const key = String(creature.id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push(creature);
+  }
+}
+
+function liveCreatures(ctx) {
+  const found = [];
+  const seen = new Set();
+  try { addCreatures(found, seen, FH.entities.getAll(ctx)); } catch (error) {}
+  try { addCreatures(found, seen, api.entities.getAll()); } catch (error) {}
+  for (const def of allCreatureDefinitions()) {
+    const id = typeIdOf(def);
+    if (!id) continue;
+    try { addCreatures(found, seen, api.entities.getAllByType(id)); } catch (error) {}
+    try {
+      if (FH.entities.getAllByType) addCreatures(found, seen, FH.entities.getAllByType(ctx, id));
+    } catch (error) {}
+  }
+  return found;
+}
+
+function aimWorldPosition(e) {
+  const mouse = e && e.session && e.session.input && e.session.input.mouse;
+  const world = mouse && (mouse.worldPosition || mouse.world || mouse.position);
+  if (world && Number.isFinite(Number(world.x)) && Number.isFinite(Number(world.y))) {
+    return { x: Number(world.x), y: Number(world.y) };
+  }
+  try {
+    const cell = api.input.getMouseCellPosition();
+    if (cell) return { x: cell.x * 4 + 2, y: cell.y * 4 + 2 };
+  } catch (error) {}
+  return null;
 }
 
 function spawnCreature(ctx, typeId, x, y) {
@@ -369,28 +459,51 @@ function registerDNANeedle() {
       },
       
       config: {
-        maxRange: 5,
+        maxRange: 80,
       },
       
       handleAction: (e, t) => {
         if (!e.session.action.state[enums.ActionState.Active]) return;
 
         resolveCreatureIds();
-        const mousePos = e.session.input.mouse.worldPosition;
-        const creatures = FH.entities.getAll(e);
+        const mousePos = aimWorldPosition(e);
+        if (!mousePos) return;
+        const creatures = liveCreatures(e);
         let best = null;
-        let bestDist = 72;
+        let bestDist = SWAB_REACH;
+        let nearestUnknown = null;
 
         for (const creature of creatures) {
           const dist = distanceToCreature(creature, mousePos.x, mousePos.y);
-          if (dist >= bestDist) continue;
+          if (dist >= bestDist && (!nearestUnknown || dist >= nearestUnknown.dist)) continue;
           const dnaInfo = dnaForCreature(creature);
-          if (!dnaInfo || creature.dnaExtracted) continue;
+          if (!dnaInfo || creature.dnaExtracted) {
+            if (dist < SWAB_REACH && (!nearestUnknown || dist < nearestUnknown.dist)) {
+              nearestUnknown = { creature, dist };
+            }
+            continue;
+          }
+          if (dist >= bestDist) continue;
           best = { creature, dnaInfo };
           bestDist = dist;
         }
 
-        if (!best) return;
+        if (!best) {
+          if (nearestUnknown) {
+            const type = String(nearestUnknown.creature.type != null ? nearestUnknown.creature.type : nearestUnknown.creature.typeId);
+            if (!unknownCreatureLog.has(type)) {
+              unknownCreatureLog.add(type);
+              const def = definitionForCreature(nearestUnknown.creature);
+              console.log("[Cloning Expanded] Swab ignored creature type " + type + " " + JSON.stringify({
+                id: def && def.id,
+                name: def && def.name,
+                nameKey: def && def.nameKey,
+                spriteId: def && (def.spriteId || def.sprite),
+              }));
+            }
+          }
+          return;
+        }
 
         const creature = best.creature;
         const dnaInfo = extractDNAFromCreature(e, creature);
@@ -500,6 +613,7 @@ function extractDNAFromCreature(ctx, creature) {
   
   if (collectedHandlers) collectedHandlers.push(cleanupHandler);
   
+  try { api.entities.startCapture(creatureId); } catch (error) {}
   FH.entities.startCapture(ctx, creatureId);
   return dnaInfo;
 }
